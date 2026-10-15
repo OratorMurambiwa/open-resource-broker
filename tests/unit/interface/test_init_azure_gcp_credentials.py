@@ -6,12 +6,6 @@ import pytest
 from requests.exceptions import HTTPError
 
 import orb.interface.init_command_handler as init_handler
-from orb.interface.init_command_handler import (
-    _get_available_credential_sources,
-    _get_credential_requirements,
-    _get_operational_requirements,
-    _test_provider_credentials,
-)
 from orb.providers.azure.configuration.config import AzureProviderConfig
 from orb.providers.azure.strategy.azure_provider_strategy import AzureProviderStrategy
 from orb.providers.gcp.configuration.config import GCPProviderConfig
@@ -42,15 +36,15 @@ def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) 
         authenticate = MagicMock(return_value="example-project")
         monkeypatch.setattr(GCPHealthCheckService, "authenticate", authenticate)
 
-    sources = _get_available_credential_sources(provider_type, container)
+    sources = init_handler._get_available_credential_sources(provider_type, container)
     assert sources and all("config_delta" in source for source in sources)
-    requirements = _get_credential_requirements(provider_type, container)
+    requirements = init_handler._get_credential_requirements(provider_type, container)
     if provider_type == "azure":
         assert requirements["client_id"]["prompt"] is True
     else:
         assert requirements == {}
-    assert _get_operational_requirements(provider_type, container)
-    success, error = _test_provider_credentials(
+    assert init_handler._get_operational_requirements(provider_type, container)
+    success, error = init_handler._test_provider_credentials(
         provider_type, sources[0]["name"], container=container
     )
 
@@ -184,6 +178,38 @@ def test_gcp_region_discovery_uses_marked_fallback_on_forbidden(monkeypatch) -> 
     assert GCPProviderStrategy.get_operational_param_default("region") == "us-central1"
 
 
+def test_gcp_init_keeps_selected_project_when_region_listing_fails(monkeypatch) -> None:
+    from orb.providers.gcp.services import init_discovery
+
+    monkeypatch.setattr(
+        init_discovery,
+        "list_projects",
+        lambda: [("first-project", "First"), ("default-project", "Default")],
+    )
+    monkeypatch.setattr(init_discovery, "default_project", lambda: "default-project")
+    regions = MagicMock(side_effect=RuntimeError("Compute API unavailable"))
+    monkeypatch.setattr(init_discovery, "list_regions", regions)
+    container = MagicMock()
+    answers = iter(["", "europe-west2"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    selected = init_handler._prompt_operational_params(
+        GCPProviderStrategy, container=container, provider_config={"type": "gcp"}
+    )
+
+    assert selected == {"project_id": "default-project", "region": "europe-west2"}
+    assert prompts[0] == "  Select (2): "
+    regions.assert_called_once_with("default-project")
+    container.get.return_value.info.assert_any_call(
+        "  Could not discover Default GCP region: Compute API unavailable"
+    )
+
+
 def test_interactive_init_selects_discovered_resources(init_container, monkeypatch) -> None:
     provider_type, strategy, container = init_container
     monkeypatch.setattr(
@@ -235,6 +261,48 @@ def test_interactive_init_selects_discovered_resources(init_container, monkeypat
     result = init_handler._interactive_setup(container)
 
     assert result["providers"][0]["config"] == expected
+
+
+def test_additional_azure_provider_uses_selected_identity_and_subscription(monkeypatch) -> None:
+    from orb.providers.azure.services import init_discovery
+
+    registration = MagicMock(strategy_class=AzureProviderStrategy)
+    registry = MagicMock()
+    registry._get_type_registration.return_value = registration
+    container = MagicMock()
+    container.get.return_value = registry
+    monkeypatch.setattr(
+        init_handler,
+        "_get_available_providers",
+        lambda _container: [{"type": "azure", "display_name": "Azure", "description": "Azure"}],
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy, "test_credentials", lambda *_args, **_kwargs: {"success": True}
+    )
+    subscriptions = MagicMock(return_value=[("sub-a", "Subscription A")])
+    groups = MagicMock(return_value=[("workers", "workers")])
+    locations = MagicMock(return_value=[("uksouth", "UK South")])
+    monkeypatch.setattr(init_discovery, "list_subscriptions", subscriptions)
+    monkeypatch.setattr(init_discovery, "list_resource_groups", groups)
+    monkeypatch.setattr(init_discovery, "list_locations", locations)
+    answers = iter(["", "managed-id", "", "", "", "", "n"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    result = init_handler._configure_additional_provider(container)
+
+    assert result == {
+        "type": "azure",
+        "config": {
+            "client_id": "managed-id",
+            "subscription_id": "sub-a",
+            "resource_group": "workers",
+            "region": "uksouth",
+        },
+        "infrastructure_defaults": {},
+    }
+    subscriptions.assert_called_once_with("managed-id")
+    groups.assert_called_once_with("managed-id", "sub-a")
+    locations.assert_called_once_with("managed-id", "sub-a")
 
 
 @pytest.mark.parametrize(
