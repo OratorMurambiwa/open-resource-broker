@@ -9,8 +9,8 @@ def test_subscription_discovery_closes_sdk_resources(monkeypatch) -> None:
     credential = MagicMock()
     client = MagicMock()
     client.subscriptions.list.return_value = [
-        MagicMock(subscription_id="sub-b", display_name="B"),
-        MagicMock(subscription_id="sub-a", display_name="A"),
+        MagicMock(subscription_id="sub-a", display_name="Zebra"),
+        MagicMock(subscription_id="sub-b", display_name="Alpha"),
     ]
     credential_factory = MagicMock(return_value=credential)
     monkeypatch.setattr(init_discovery, "create_default_azure_credential", credential_factory)
@@ -18,7 +18,10 @@ def test_subscription_discovery_closes_sdk_resources(monkeypatch) -> None:
         "azure.mgmt.resource.subscriptions.SubscriptionClient", MagicMock(return_value=client)
     )
 
-    assert init_discovery.list_subscriptions("managed-id") == [("sub-a", "A"), ("sub-b", "B")]
+    assert init_discovery.list_subscriptions("managed-id") == [
+        ("sub-b", "Alpha"),
+        ("sub-a", "Zebra"),
+    ]
     assert credential_factory.call_args.kwargs["client_id"] == "managed-id"
     client.close.assert_called_once()
     credential.close.assert_called_once()
@@ -34,7 +37,10 @@ def test_resource_group_and_location_discovery_use_subscription(monkeypatch) -> 
     location = MagicMock()
     location.name = "uksouth"
     location.display_name = "UK South"
-    subscription_client.subscriptions.list_locations.return_value = [location]
+    location.metadata.region_type = "Physical"
+    logical_location = MagicMock(name="europe", display_name="Europe")
+    logical_location.metadata.region_type = "Logical"
+    subscription_client.subscriptions.list_locations.return_value = [location, logical_location]
     monkeypatch.setattr(
         init_discovery, "create_default_azure_credential", MagicMock(return_value=credential)
     )

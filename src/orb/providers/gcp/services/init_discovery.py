@@ -2,8 +2,10 @@
 
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote
 
 _DISCOVERY_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+_MAX_DISCOVERY_PAGES = 100
 
 
 def default_project() -> str | None:
@@ -22,7 +24,7 @@ def _list_pages(url: str) -> Iterator[dict[str, Any]]:
     session = AuthorizedSession(credentials)
     try:
         page_token = ""
-        while True:
+        for page_number in range(_MAX_DISCOVERY_PAGES):
             response = session.get(url, params={"pageToken": page_token} if page_token else None)
             response.raise_for_status()
             page = response.json()
@@ -34,6 +36,8 @@ def _list_pages(url: str) -> Iterator[dict[str, Any]]:
                 raise ValueError("GCP discovery returned an invalid page token")
             if not page_token:
                 break
+            if page_number == _MAX_DISCOVERY_PAGES - 1:
+                raise ValueError("GCP discovery exceeded the page limit")
     finally:
         session.close()
 
@@ -60,7 +64,7 @@ def list_projects() -> list[tuple[str, str]]:
 def list_regions(project_id: str) -> list[tuple[str, str]]:
     """List Compute Engine regions available to the selected project."""
     regions: set[str] = set()
-    url = f"https://compute.googleapis.com/compute/v1/projects/{project_id}/regions"
+    url = f"https://compute.googleapis.com/compute/v1/projects/{quote(project_id, safe='')}/regions"
     for page in _list_pages(url):
         entries = page.get("items", [])
         if not isinstance(entries, list):

@@ -122,3 +122,31 @@ def test_project_discovery_uses_project_id_when_display_name_is_missing(monkeypa
     )
 
     assert init_discovery.list_projects() == [("selected-project", "selected-project")]
+
+
+def test_discovery_page_limit_closes_session(monkeypatch) -> None:
+    session = MagicMock()
+    session.get.return_value.json.return_value = {"nextPageToken": "same-token"}
+    monkeypatch.setattr(init_discovery, "_MAX_DISCOVERY_PAGES", 2)
+    monkeypatch.setattr("google.auth.default", lambda **_kwargs: (object(), None))
+    monkeypatch.setattr(
+        "google.auth.transport.requests.AuthorizedSession", MagicMock(return_value=session)
+    )
+
+    with pytest.raises(ValueError, match="page limit"):
+        init_discovery.list_projects()
+
+    assert session.get.call_count == 2
+    session.close.assert_called_once()
+
+
+def test_region_request_quotes_free_text_project_id(monkeypatch) -> None:
+    session = MagicMock()
+    session.get.return_value.json.return_value = {"items": []}
+    monkeypatch.setattr("google.auth.default", lambda **_kwargs: (object(), None))
+    monkeypatch.setattr(
+        "google.auth.transport.requests.AuthorizedSession", MagicMock(return_value=session)
+    )
+
+    assert init_discovery.list_regions("a/b?x") == []
+    assert "/projects/a%2Fb%3Fx/regions" in session.get.call_args.args[0]

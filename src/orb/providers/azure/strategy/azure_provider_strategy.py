@@ -13,9 +13,12 @@ from collections.abc import Mapping
 from threading import Condition, RLock
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from pydantic import ValidationError
+
 from orb.domain.base.ports import LoggingPort
 from orb.infrastructure.adapters.logging_adapter import LoggingAdapter
 from orb.infrastructure.di.injectable import injectable
+from orb.infrastructure.mocking.dry_run_context import is_dry_run_active
 from orb.providers.azure.capabilities import (
     get_supported_api_capabilities,
     get_supported_apis,
@@ -25,6 +28,7 @@ from orb.providers.azure.configuration.validator import validate_azure_template
 from orb.providers.azure.domain.template.azure_template_aggregate import AzureTemplate
 from orb.providers.azure.domain.template.value_objects import AzureProviderApi
 from orb.providers.azure.exceptions import AzureError, AzureValidationError
+from orb.providers.azure.infrastructure.credential_factory import DefaultAzureAccessTokenProvider
 from orb.providers.azure.infrastructure.error_utils import (
     canonical_azure_error_code,
     extract_azure_error_details,
@@ -480,6 +484,23 @@ class AzureProviderStrategy(ProviderStrategy):
         return "eastus2"
 
     @classmethod
+    def get_operational_param_default(cls, param: str) -> str:
+        """Default only the deployable location, never the subscription or group."""
+        return cls.get_default_region() if param == "region" else ""
+
+    @classmethod
+    def validate_operational_param(
+        cls, param: str, value: str, selected_config: dict[str, Any]
+    ) -> str | None:
+        """Validate manual init input with the provider config model."""
+        del selected_config
+        try:
+            AzureProviderConfig.model_validate({param: value})
+        except ValidationError as exc:
+            return str(exc.errors()[0]["msg"])
+        return None
+
+    @classmethod
     def get_cli_provider_config(cls, args: argparse.Namespace) -> dict[str, Any]:
         """Extract Azure provider config from init CLI args."""
         args_dict = vars(args)
@@ -521,11 +542,20 @@ class AzureProviderStrategy(ProviderStrategy):
 
     @classmethod
     def test_credentials(cls, credential_source: Optional[str] = None, **kwargs) -> dict:
-        """Validate Azure credentials by performing a health check."""
+        """Validate Azure credentials without health-check traceback output."""
         del credential_source
-        config = AzureProviderConfig.model_validate({"client_id": kwargs.get("client_id")})
-        health = AzureHealthCheckService(config=config, logger=LoggingAdapter()).check_health()
-        return _credential_result_from_health(health)
+        if is_dry_run_active():
+            return {"success": True}
+        try:
+            DefaultAzureAccessTokenProvider(
+                client_id=kwargs.get("client_id"), logger=LoggingAdapter()
+            ).get_access_token("https://management.azure.com/.default")
+            return {"success": True}
+        except ImportError:
+            return {"success": False, "error": "Install orb-py[azure] to use Azure init."}
+        except Exception as exc:
+            LoggingAdapter().debug("Azure init authentication failed: %s", exc, exc_info=True)
+            return {"success": False, "error": str(exc).splitlines()[0] or type(exc).__name__}
 
     async def test_credentials_async(
         self, credential_source: Optional[str] = None, **kwargs

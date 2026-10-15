@@ -8,6 +8,8 @@ import time
 from collections.abc import Callable
 from typing import Any, Mapping, Optional
 
+from pydantic import ValidationError
+
 from orb.domain.base.ports import LoggingPort
 from orb.domain.machine.aggregate import Machine
 from orb.infrastructure.di.injectable import injectable
@@ -661,10 +663,17 @@ class GCPProviderStrategy(ProviderStrategy):
     ) -> list[tuple[str, str]]:
         """Discover projects and regions available to the current identity."""
         if param == "project_id":
-            projects = init_discovery.list_projects()
+            from requests.exceptions import HTTPError
+
+            try:
+                projects = init_discovery.list_projects()
+            except HTTPError as exc:
+                if exc.response is None or exc.response.status_code != 403:
+                    raise
+                projects = []
             project_id = init_discovery.default_project()
             if project_id and project_id not in {value for value, _ in projects}:
-                projects.insert(0, (project_id, f"{project_id} (ADC default)"))
+                projects.insert(0, (project_id, f"{project_id} (ADC default; unverified)"))
             return projects
         if param == "region" and (project_id := selected_config.get("project_id")):
             from requests.exceptions import HTTPError
@@ -689,6 +698,19 @@ class GCPProviderStrategy(ProviderStrategy):
         return ""
 
     @classmethod
+    def validate_operational_param(
+        cls, param: str, value: str, selected_config: dict[str, Any]
+    ) -> str | None:
+        """Validate manual init input with the provider config model."""
+        config = {"project_id": selected_config.get("project_id", value)}
+        config[param] = value
+        try:
+            GCPProviderConfig.model_validate(config)
+        except ValidationError as exc:
+            return str(exc.errors()[0]["msg"])
+        return None
+
+    @classmethod
     def get_cli_extra_config_keys(cls) -> set[str]:
         """List additional template keys accepted from GCP CLI arguments."""
         return {"network", "subnetwork", "service_account_email", "service_account_scopes"}
@@ -711,35 +733,31 @@ class GCPProviderStrategy(ProviderStrategy):
             ]
         return result
 
-    def discover_infrastructure(self, provider_config: Mapping[str, object]) -> dict[str, object]:
+    def discover_infrastructure(self, provider_config: Mapping[str, Any]) -> dict[str, object]:
         """Return the configured infrastructure fields visible to the GCP provider."""
         config = provider_config.get("config", provider_config)
-        config_mapping = config if isinstance(config, Mapping) else {}
         return {
             "provider": provider_config.get("name", self._provider_name or "gcp"),
-            "project_id": config_mapping.get("project_id", self._config.project_id),
-            "region": config_mapping.get("region", self._config.region),
-            "networks": [config_mapping.get("network")] if config_mapping.get("network") else [],
-            "subnetworks": [config_mapping.get("subnetwork")]
-            if config_mapping.get("subnetwork")
-            else [],
+            "project_id": config.get("project_id", self._config.project_id),
+            "region": config.get("region", self._config.region),
+            "networks": [config.get("network")] if config.get("network") else [],
+            "subnetworks": [config.get("subnetwork")] if config.get("subnetwork") else [],
         }
 
     def discover_infrastructure_interactive(
         self,
-        provider_config: Mapping[str, object],
+        provider_config: Mapping[str, Any],
     ) -> dict[str, object]:
         """Return discovered infrastructure without prompting for extra input."""
         return self.discover_infrastructure(provider_config)
 
-    def validate_infrastructure(self, provider_config: Mapping[str, object]) -> dict[str, object]:
+    def validate_infrastructure(self, provider_config: Mapping[str, Any]) -> dict[str, object]:
         """Validate the minimum infrastructure fields required by the provider."""
         config = provider_config.get("config", provider_config)
-        config_mapping = config if isinstance(config, Mapping) else {}
         errors: list[str] = []
-        if not config_mapping.get("project_id"):
+        if not config.get("project_id"):
             errors.append("project_id is required")
-        if not config_mapping.get("region"):
+        if not config.get("region"):
             errors.append("region is required")
         return {"valid": len(errors) == 0, "errors": errors, "warnings": []}
 

@@ -24,12 +24,16 @@ def init_container(request):
     return provider_type, strategy, container
 
 
+def _mock_init_credentials(strategy, monkeypatch):
+    monkeypatch.setattr(strategy, "test_credentials", lambda *_args, **_kwargs: {"success": True})
+
+
 def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) -> None:
     provider_type, strategy, container = init_container
     if strategy is AzureProviderStrategy:
         token_provider = MagicMock()
         monkeypatch.setattr(
-            "orb.providers.azure.services.health_check_service.DefaultAzureAccessTokenProvider",
+            "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
             token_provider,
         )
     else:
@@ -67,7 +71,7 @@ def test_gcp_init_reports_authentication_failure(monkeypatch) -> None:
 def test_azure_init_uses_selected_managed_identity(monkeypatch) -> None:
     token_provider = MagicMock()
     monkeypatch.setattr(
-        "orb.providers.azure.services.health_check_service.DefaultAzureAccessTokenProvider",
+        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
         token_provider,
     )
 
@@ -75,6 +79,46 @@ def test_azure_init_uses_selected_managed_identity(monkeypatch) -> None:
 
     assert result == {"success": True}
     assert token_provider.call_args.kwargs["client_id"] == "managed-identity-id"
+
+
+def test_azure_init_reports_one_line_authentication_error(monkeypatch) -> None:
+    token_provider = MagicMock()
+    token_provider.return_value.get_access_token.side_effect = RuntimeError(
+        "Credential chain failed\nDetailed SDK diagnostics"
+    )
+    monkeypatch.setattr(
+        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
+        token_provider,
+    )
+
+    assert AzureProviderStrategy.test_credentials() == {
+        "success": False,
+        "error": "Credential chain failed",
+    }
+
+
+def test_azure_init_reports_missing_extra(monkeypatch) -> None:
+    token_provider = MagicMock()
+    token_provider.return_value.get_access_token.side_effect = ImportError("No module named azure")
+    monkeypatch.setattr(
+        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
+        token_provider,
+    )
+
+    assert AzureProviderStrategy.test_credentials() == {
+        "success": False,
+        "error": "Install orb-py[azure] to use Azure init.",
+    }
+
+
+def test_gcp_init_rejects_invalid_manual_project_and_region() -> None:
+    assert GCPProviderStrategy.validate_operational_param("project_id", "a/b?x", {})
+    assert GCPProviderStrategy.validate_operational_param("project_id", "valid-project", {}) is None
+    selected = {"project_id": "valid-project"}
+    assert GCPProviderStrategy.validate_operational_param("region", "invalid region", selected)
+    assert (
+        GCPProviderStrategy.validate_operational_param("region", "europe-west2", selected) is None
+    )
 
 
 def test_interactive_init_collects_azure_and_gcp_config(init_container, monkeypatch) -> None:
@@ -94,9 +138,19 @@ def test_interactive_init_collects_azure_and_gcp_config(init_container, monkeypa
             {"type": provider_type, "display_name": provider_type, "description": provider_type}
         ],
     )
-    monkeypatch.setattr(strategy, "test_credentials", lambda *_args, **_kwargs: {"success": True})
+    _mock_init_credentials(strategy, monkeypatch)
     values = (
-        ["", "", "", "", "subscription-id", "resource-group", "eastus2", "n", "n"]
+        [
+            "",
+            "",
+            "",
+            "",
+            "00000000-0000-0000-0000-000000000001",
+            "resource-group",
+            "eastus2",
+            "n",
+            "n",
+        ]
         if provider_type == "azure"
         else ["", "", "", "example-project", "us-central1", "n", "n"]
     )
@@ -108,7 +162,7 @@ def test_interactive_init_collects_azure_and_gcp_config(init_container, monkeypa
     config = result["providers"][0]["config"]
     if provider_type == "azure":
         assert config == {
-            "subscription_id": "subscription-id",
+            "subscription_id": "00000000-0000-0000-0000-000000000001",
             "resource_group": "resource-group",
             "region": "eastus2",
         }
@@ -140,6 +194,135 @@ def test_azure_discovery_uses_selected_subscription(monkeypatch) -> None:
     subscriptions.assert_called_once_with("identity-id")
     groups.assert_called_once_with("identity-id", "sub-a")
     locations.assert_called_once_with("identity-id", "sub-a")
+
+
+def test_azure_subscription_requires_explicit_valid_menu_selection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_operational_requirements",
+        lambda: {"subscription_id": {"required": True, "description": "Azure subscription ID"}},
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_contextual_operational_param_choices",
+        lambda _param, _selected: [("subscription-id", "Subscription")],
+    )
+    answers = iter(["", "99", "1"])
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+
+    selected = init_handler._prompt_operational_params(
+        AzureProviderStrategy,
+        container=MagicMock(),
+        provider_config={"type": "azure"},
+    )
+
+    assert selected == {"subscription_id": "subscription-id"}
+    assert prompts == ["  Select: "] * 3
+
+
+def test_required_free_text_reprompts_after_blank_input(monkeypatch) -> None:
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_operational_requirements",
+        lambda: {"subscription_id": {"required": True, "description": "Azure subscription ID"}},
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_contextual_operational_param_choices",
+        lambda _param, _selected: [],
+    )
+    answers = iter(["", "00000000-0000-0000-0000-000000000001"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    selected = init_handler._prompt_operational_params(
+        AzureProviderStrategy,
+        container=MagicMock(),
+        provider_config={"type": "azure"},
+    )
+
+    assert selected["subscription_id"] == "00000000-0000-0000-0000-000000000001"
+
+
+def test_invalid_custom_subscription_reprompts_before_config_is_written(monkeypatch) -> None:
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_operational_requirements",
+        lambda: {"subscription_id": {"required": True, "description": "Azure subscription ID"}},
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_contextual_operational_param_choices",
+        lambda _param, _selected: [],
+    )
+    answers = iter(["not-a-uuid", "00000000-0000-0000-0000-000000000001"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+    selected = init_handler._prompt_operational_params(
+        AzureProviderStrategy,
+        container=MagicMock(),
+        provider_config={"type": "azure"},
+    )
+
+    assert selected["subscription_id"] == "00000000-0000-0000-0000-000000000001"
+
+
+def test_azure_location_menu_uses_provider_default(monkeypatch) -> None:
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_operational_requirements",
+        lambda: {"region": {"required": True, "description": "Azure location"}},
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_contextual_operational_param_choices",
+        lambda _param, _selected: [("centralus", "Central US"), ("eastus2", "East US 2")],
+    )
+    prompts = []
+
+    def answer(prompt):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", answer)
+
+    selected = init_handler._prompt_operational_params(
+        AzureProviderStrategy,
+        container=MagicMock(),
+        provider_config={"type": "azure"},
+    )
+
+    assert selected == {"region": "eastus2"}
+    assert prompts == ["  Select (2): "]
+
+
+def test_missing_azure_extra_has_short_install_hint(monkeypatch) -> None:
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_operational_requirements",
+        lambda: {"subscription_id": {"required": True, "description": "Azure subscription ID"}},
+    )
+    monkeypatch.setattr(
+        AzureProviderStrategy,
+        "get_contextual_operational_param_choices",
+        MagicMock(side_effect=ImportError("No module named azure.mgmt.resource")),
+    )
+    monkeypatch.setattr("builtins.input", lambda _prompt: "00000000-0000-0000-0000-000000000001")
+    container = MagicMock()
+
+    assert init_handler._prompt_operational_params(
+        AzureProviderStrategy,
+        container=container,
+        provider_config={"type": "azure"},
+    ) == {"subscription_id": "00000000-0000-0000-0000-000000000001"}
+    container.get.return_value.info.assert_any_call(
+        "  Discovery unavailable. Install orb-py[azure] to enable it."
+    )
 
 
 def test_gcp_discovery_uses_selected_project(monkeypatch) -> None:
@@ -178,6 +361,22 @@ def test_gcp_region_discovery_uses_marked_fallback_on_forbidden(monkeypatch) -> 
     assert GCPProviderStrategy.get_operational_param_default("region") == "us-central1"
 
 
+def test_gcp_project_discovery_uses_adc_project_on_forbidden(monkeypatch) -> None:
+    from orb.providers.gcp.services import init_discovery
+
+    response = MagicMock(status_code=403)
+    monkeypatch.setattr(
+        init_discovery,
+        "list_projects",
+        MagicMock(side_effect=HTTPError("Forbidden", response=response)),
+    )
+    monkeypatch.setattr(init_discovery, "default_project", lambda: "adc-project")
+
+    assert GCPProviderStrategy.get_contextual_operational_param_choices("project_id", {}) == [
+        ("adc-project", "adc-project (ADC default; unverified)")
+    ]
+
+
 def test_gcp_init_keeps_selected_project_when_region_listing_fails(monkeypatch) -> None:
     from orb.providers.gcp.services import init_discovery
 
@@ -199,14 +398,16 @@ def test_gcp_init_keeps_selected_project_when_region_listing_fails(monkeypatch) 
 
     monkeypatch.setattr("builtins.input", answer)
     selected = init_handler._prompt_operational_params(
-        GCPProviderStrategy, container=container, provider_config={"type": "gcp"}
+        GCPProviderStrategy,
+        container=container,
+        provider_config={"type": "gcp"},
     )
 
     assert selected == {"project_id": "default-project", "region": "europe-west2"}
     assert prompts[0] == "  Select (2): "
     regions.assert_called_once_with("default-project")
     container.get.return_value.info.assert_any_call(
-        "  Could not discover Default GCP region: Compute API unavailable"
+        "  Could not discover Default GCP region; enter it manually."
     )
 
 
@@ -224,7 +425,7 @@ def test_interactive_init_selects_discovered_resources(init_container, monkeypat
             {"type": provider_type, "display_name": provider_type, "description": provider_type}
         ],
     )
-    monkeypatch.setattr(strategy, "test_credentials", lambda *_args, **_kwargs: {"success": True})
+    _mock_init_credentials(strategy, monkeypatch)
 
     if provider_type == "azure":
         from orb.providers.azure.services import init_discovery
@@ -240,7 +441,7 @@ def test_interactive_init_selects_discovered_resources(init_container, monkeypat
             "list_locations",
             lambda _client, _subscription: [("uksouth", "UK South")],
         )
-        answers = iter(["", "", "", "", "", "", "", "n", "n"])
+        answers = iter(["", "", "", "", "1", "1", "1", "n", "n"])
         expected = {"subscription_id": "sub-a", "resource_group": "workers", "region": "uksouth"}
     else:
         from orb.providers.gcp.services import init_discovery
@@ -254,7 +455,7 @@ def test_interactive_init_selects_discovered_resources(init_container, monkeypat
         monkeypatch.setattr(
             init_discovery, "list_regions", lambda _project: [("europe-west2", "London")]
         )
-        answers = iter(["", "", "", "", "", "n", "n"])
+        answers = iter(["", "", "", "", "1", "n", "n"])
         expected = {"project_id": "default-project", "region": "europe-west2"}
 
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
@@ -276,16 +477,14 @@ def test_additional_azure_provider_uses_selected_identity_and_subscription(monke
         "_get_available_providers",
         lambda _container: [{"type": "azure", "display_name": "Azure", "description": "Azure"}],
     )
-    monkeypatch.setattr(
-        AzureProviderStrategy, "test_credentials", lambda *_args, **_kwargs: {"success": True}
-    )
+    _mock_init_credentials(AzureProviderStrategy, monkeypatch)
     subscriptions = MagicMock(return_value=[("sub-a", "Subscription A")])
     groups = MagicMock(return_value=[("workers", "workers")])
     locations = MagicMock(return_value=[("uksouth", "UK South")])
     monkeypatch.setattr(init_discovery, "list_subscriptions", subscriptions)
     monkeypatch.setattr(init_discovery, "list_resource_groups", groups)
     monkeypatch.setattr(init_discovery, "list_locations", locations)
-    answers = iter(["", "managed-id", "", "", "", "", "n"])
+    answers = iter(["", "managed-id", "", "1", "1", "1", "n"])
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     result = init_handler._configure_additional_provider(container)

@@ -12,14 +12,15 @@ def list_subscriptions(client_id: str | None) -> list[tuple[str, str]]:
     try:
         client = SubscriptionClient(credential)
         try:
-            return sorted(
+            subscriptions = [
                 (
                     subscription.subscription_id,
                     subscription.display_name or subscription.subscription_id,
                 )
                 for subscription in client.subscriptions.list()
                 if subscription.subscription_id
-            )
+            ]
+            return sorted(subscriptions, key=lambda item: (item[1].casefold(), item[0]))
         finally:
             client.close()
     finally:
@@ -55,6 +56,8 @@ def list_locations(client_id: str | None, subscription_id: str) -> list[tuple[st
                 (location.name, location.display_name or location.name)
                 for location in client.subscriptions.list_locations(subscription_id)
                 if location.name
+                and location.metadata is not None
+                and location.metadata.region_type == "Physical"
             )
         finally:
             client.close()

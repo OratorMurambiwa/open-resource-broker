@@ -517,6 +517,7 @@ def _prompt_operational_params(
 
     result: dict[str, Any] = {}
     selected_config = dict(provider_config or {})
+    validates_input = hasattr(strategy_class, "validate_operational_param")
     for param, info in op_requirements.items():
         if not info.get("required"):
             continue
@@ -537,10 +538,22 @@ def _prompt_operational_params(
                 )
             elif hasattr(strategy_class, "get_operational_param_choices"):
                 choices = strategy_class.get_operational_param_choices(param) or []
+        except ImportError as exc:
+            if validates_input:
+                logger.debug("Could not discover %s: %s", description, exc, exc_info=True)
+                provider_type = (provider_config or {}).get("type")
+                console.info(
+                    f"  Discovery unavailable. Install orb-py[{provider_type}] to enable it."
+                )
+            else:
+                console.info(f"  Could not discover {description}: {exc}")
+            choices = []
         except Exception as exc:
-            # Strategy hook raised or returned a broken shape; free-text prompt
-            # is the safe fallback so init keeps working with degraded UX.
-            console.info(f"  Could not discover {description}: {exc}")
+            if validates_input:
+                logger.debug("Could not discover %s: %s", description, exc, exc_info=True)
+                console.info(f"  Could not discover {description}; enter it manually.")
+            else:
+                console.info(f"  Could not discover {description}: {exc}")
             choices = []
         try:
             if hasattr(strategy_class, "get_operational_param_default"):
@@ -551,31 +564,53 @@ def _prompt_operational_params(
             default_value = ""
 
         console.info("")
-        if not choices:
-            raw = input(f"  {description}: ").strip()
-            result[param] = raw if raw else default_value
-        else:
+        if choices:
             console.info(f"  Select {description}:")
             for i, (val, label) in enumerate(choices, 1):
                 console.info(f"  ({i:2}) {val:<20} {label}")
             other_num = len(choices) + 1
             console.info(f"  ({other_num:2}) Other (enter custom value)")
             console.info("")
-            default_choice = next(
-                (i for i, (value, _) in enumerate(choices, 1) if value == default_value), 1
-            )
-            choice = input(f"  Select ({default_choice}): ").strip() or str(default_choice)
-            try:
-                idx = int(choice) - 1
+
+        while True:
+            custom_value = not choices
+            if not choices:
+                value = input(f"  {description}: ").strip() or default_value
+            else:
+                default_choice = next(
+                    (i for i, (choice, _) in enumerate(choices, 1) if choice == default_value),
+                    None if validates_input else 1,
+                )
+                prompt = f"  Select ({default_choice}): " if default_choice else "  Select: "
+                choice = input(prompt).strip() or str(default_choice or "")
+                try:
+                    idx = int(choice) - 1
+                except ValueError:
+                    idx = -1
                 if 0 <= idx < len(choices):
-                    result[param] = choices[idx][0]
+                    value = choices[idx][0]
                 elif idx == len(choices):
-                    raw = input(f"  Enter custom {description}: ").strip()
-                    result[param] = raw if raw else default_value
+                    value = input(f"  Enter custom {description}: ").strip() or default_value
+                    custom_value = True
                 else:
-                    result[param] = default_value
-            except ValueError:
-                result[param] = default_value
+                    if validates_input:
+                        console.info("  Select a listed option or Other.")
+                        continue
+                    value = default_value
+
+            if validates_input:
+                if not value:
+                    console.info(f"  {description} is required.")
+                    continue
+                if custom_value and (
+                    error := strategy_class.validate_operational_param(
+                        param, value, selected_config
+                    )
+                ):
+                    console.info(f"  {error}")
+                    continue
+            result[param] = value
+            break
 
         selected_config[param] = result[param]
 
