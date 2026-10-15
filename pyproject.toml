@@ -235,6 +235,8 @@ test-azure = [
     "azure-core>=1.38.2",
     "azure-identity>=1.25.2",
     "azure-mgmt-compute>=37.2.0",
+    "azure-mgmt-resource>=25.0.0",
+    "azure-mgmt-resource-subscriptions>=1.0.0",
 ]
 
 # GCP provider tests use Compute SDK models and google-api-core exceptions.
