@@ -219,9 +219,11 @@ def _interactive_setup(container: Any) -> Dict[str, Any]:
         auth_requirements = _get_credential_requirements(provider_type, container=container)
         provider_config: Dict[str, Any] = {"type": provider_type}
         for param, info in auth_requirements.items():
-            if info.get("required"):
+            if info.get("required") or info.get("prompt"):
                 prompt = f"  {info['description']}: "
-                provider_config[param] = input(prompt).strip()
+                value = input(prompt).strip()
+                if value or info.get("required"):
+                    provider_config[param] = value
 
         # Step 2: select credentials
         console.info("  Discovering credential sources...")
@@ -260,7 +262,9 @@ def _interactive_setup(container: Any) -> Dict[str, Any]:
 
         # Step 4: operational params (provider-specific, e.g. region, project, namespace)
         strategy_class = _get_provider_strategy(provider_type, container=container)
-        op_params = _prompt_operational_params(strategy_class, container=container)
+        op_params = _prompt_operational_params(
+            strategy_class, container=container, provider_config=provider_config
+        )
         provider_config.update(op_params)
 
         console.info("")
@@ -379,9 +383,11 @@ def _configure_additional_provider(container: Any) -> Optional[Dict[str, Any]]:
         auth_requirements = _get_credential_requirements(provider_type, container=container)
         provider_config: Dict[str, Any] = {"type": provider_type}
         for param, info in auth_requirements.items():
-            if info.get("required"):
+            if info.get("required") or info.get("prompt"):
                 prompt = f"  {info['description']}: "
-                provider_config[param] = input(prompt).strip()
+                value = input(prompt).strip()
+                if value or info.get("required"):
+                    provider_config[param] = value
 
         # Step 2: select credentials
         console.info("  Discovering credential sources...")
@@ -419,7 +425,9 @@ def _configure_additional_provider(container: Any) -> Optional[Dict[str, Any]]:
 
         # Step 4: operational params (provider-specific, e.g. region, project, namespace)
         strategy_class = _get_provider_strategy(provider_type, container=container)
-        op_params = _prompt_operational_params(strategy_class, container=container)
+        op_params = _prompt_operational_params(
+            strategy_class, container=container, provider_config=provider_config
+        )
         provider_config.update(op_params)
 
         # Infrastructure discovery
@@ -478,16 +486,19 @@ def _get_provider_strategy(
 
 
 def _prompt_operational_params(
-    strategy_class: Optional[type], container: Any = None
+    strategy_class: Optional[type],
+    container: Any = None,
+    provider_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Interactively collect operational parameters from the operator.
 
     Calls ``get_operational_requirements()`` on the strategy class to discover
     what parameters are needed (e.g. region, project, namespace).  For each
     required parameter the strategy class may optionally supply a list of
-    choices and a default via ``get_operational_param_choices(param)`` and
-    ``get_operational_param_default(param)`` — if those classmethods are absent
-    the field degrades to free-text input.
+    choices via ``get_operational_param_choices(param)`` or, for providers whose
+    choices depend on earlier selections,
+    ``get_contextual_operational_param_choices(param, selected_config)``.
+    Empty choices leave the field as free-text input.
 
     Returns an opaque ``dict[str, Any]`` that the caller merges into the
     provider config without inspecting individual keys.
@@ -505,6 +516,7 @@ def _prompt_operational_params(
         logger.debug("Could not get provider operational requirements from strategy: %s", e)
 
     result: dict[str, Any] = {}
+    selected_config = dict(provider_config or {})
     for param, info in op_requirements.items():
         if not info.get("required"):
             continue
@@ -512,15 +524,23 @@ def _prompt_operational_params(
         description = info.get("description", param)
 
         # Provider strategies may expose a list of (value, label) choices for
-        # a given parameter.  If the classmethod is absent fall back to free text.
+        # a given parameter.
         choices: list[tuple[str, str]] = []
         default_value: str = ""
         try:
-            if hasattr(strategy_class, "get_operational_param_choices"):
+            if isinstance(strategy_class, type) and hasattr(
+                strategy_class, "get_contextual_operational_param_choices"
+            ):
+                choices = (
+                    strategy_class.get_contextual_operational_param_choices(param, selected_config)
+                    or []
+                )
+            elif hasattr(strategy_class, "get_operational_param_choices"):
                 choices = strategy_class.get_operational_param_choices(param) or []
-        except Exception:
+        except Exception as exc:
             # Strategy hook raised or returned a broken shape; free-text prompt
             # is the safe fallback so init keeps working with degraded UX.
+            console.info(f"  Could not discover {description}: {exc}")
             choices = []
         try:
             if hasattr(strategy_class, "get_operational_param_default"):
@@ -541,7 +561,10 @@ def _prompt_operational_params(
             other_num = len(choices) + 1
             console.info(f"  ({other_num:2}) Other (enter custom value)")
             console.info("")
-            choice = input("  Select (1): ").strip() or "1"
+            default_choice = next(
+                (i for i, (value, _) in enumerate(choices, 1) if value == default_value), 1
+            )
+            choice = input(f"  Select ({default_choice}): ").strip() or str(default_choice)
             try:
                 idx = int(choice) - 1
                 if 0 <= idx < len(choices):
@@ -553,6 +576,8 @@ def _prompt_operational_params(
                     result[param] = default_value
             except ValueError:
                 result[param] = default_value
+
+        selected_config[param] = result[param]
 
     return result
 
@@ -637,9 +662,8 @@ def _discover_infrastructure(
     Discovery requires a live provider instance (cluster / account access).
     The instance is constructed via ``create_strategy_by_type`` using the
     credentials and region the operator already confirmed in the init flow.
-    All provider config keys collected during the init flow are forwarded
-    together as a single dict; providers that only use a subset of them are
-    unaffected.
+    The wizard's ``type`` selector is not part of the provider config model.
+    Only provider config fields are forwarded to the strategy factory.
 
     Args:
         provider_type: The provider type identifier (e.g. ``"aws"``).
@@ -654,13 +678,14 @@ def _discover_infrastructure(
     """
     console = container.get(ConsolePort)
     try:
-        strategy = registry.create_strategy_by_type(provider_type, provider_config)
+        config_values = {key: value for key, value in provider_config.items() if key != "type"}
+        strategy = registry.create_strategy_by_type(provider_type, config_values)
         if strategy is None:
             console.error(f"Failed to construct strategy for provider type: {provider_type}")
             return {}
 
         if hasattr(strategy, "discover_infrastructure_interactive"):
-            full_config = {"type": provider_type, "config": provider_config}
+            full_config = {"type": provider_type, "config": config_values}
             return strategy.discover_infrastructure_interactive(full_config)
         console.info(f"Infrastructure discovery not supported for provider type: {provider_type}")
         return {}

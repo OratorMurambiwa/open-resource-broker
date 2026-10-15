@@ -35,6 +35,7 @@ from orb.providers.gcp.services import (
     GCPMutationService,
     GCPOperationContextService,
     GCPProvisioningService,
+    init_discovery,
 )
 from orb.providers.gcp.services.operation_context import GCPMutationOperationContext
 from orb.providers.gcp.services.operation_parameters import (
@@ -604,7 +605,8 @@ class GCPProviderStrategy(ProviderStrategy):
         """Run the provider health check service."""
         return self._health_service.check_health()
 
-    def generate_provider_name(self, config: dict[str, Any]) -> str:
+    @classmethod
+    def generate_provider_name(cls, config: dict[str, Any]) -> str:
         """Generate a provider name from GCP project and region values."""
         project_id = config.get("project_id", "default")
         region = config.get("region", "global")
@@ -623,35 +625,76 @@ class GCPProviderStrategy(ProviderStrategy):
         """Return the expected provider-name pattern."""
         return "{type}_{project_id}_{region}"
 
-    def get_available_credential_sources(self) -> list[dict]:
+    @classmethod
+    def get_available_credential_sources(cls) -> list[dict]:
         """List credential sources visible to the health check service."""
-        return self._health_service.get_available_credential_sources()
+        return GCPHealthCheckService.get_available_credential_sources()
 
-    def test_credentials(self, credential_source: Optional[str] = None, **kwargs) -> dict:
+    @classmethod
+    def test_credentials(cls, credential_source: Optional[str] = None, **kwargs) -> dict:
         """Validate access using the selected credential source."""
-        return self._health_service.test_credentials(credential_source, **kwargs)
+        return GCPHealthCheckService.test_credentials(credential_source, **kwargs)
 
-    def get_credential_requirements(self) -> dict:
+    @classmethod
+    def get_credential_requirements(cls) -> dict:
         """Return the credential requirements for the GCP provider."""
-        return self._health_service.get_credential_requirements()
+        return GCPHealthCheckService.get_credential_requirements()
 
-    def get_operational_requirements(self) -> dict:
+    @classmethod
+    def get_operational_requirements(cls) -> dict:
         """Return non-credential operational requirements for the GCP provider."""
-        return self._health_service.get_operational_requirements()
+        return GCPHealthCheckService.get_operational_requirements()
 
-    def get_available_regions(self) -> list[tuple[str, str]]:
+    @classmethod
+    def get_available_regions(cls) -> list[tuple[str, str]]:
         """List available GCP regions exposed through the CLI surface."""
-        return list(self._AVAILABLE_REGIONS)
+        return list(cls._AVAILABLE_REGIONS)
 
-    def get_default_region(self) -> str:
+    @classmethod
+    def get_default_region(cls) -> str:
         """Return the default region for new GCP providers."""
         return "us-central1"
 
-    def get_cli_extra_config_keys(self) -> set[str]:
+    @classmethod
+    def get_contextual_operational_param_choices(
+        cls, param: str, selected_config: dict[str, Any]
+    ) -> list[tuple[str, str]]:
+        """Discover projects and regions available to the current identity."""
+        if param == "project_id":
+            projects = init_discovery.list_projects()
+            project_id = init_discovery.default_project()
+            if project_id and project_id not in {value for value, _ in projects}:
+                projects.insert(0, (project_id, f"{project_id} (ADC default)"))
+            return projects
+        if param == "region" and (project_id := selected_config.get("project_id")):
+            from requests.exceptions import HTTPError
+
+            try:
+                return init_discovery.list_regions(project_id)
+            except HTTPError as exc:
+                if exc.response is None or exc.response.status_code != 403:
+                    raise
+                return [
+                    (region, f"{label} (unverified)") for region, label in cls._AVAILABLE_REGIONS
+                ]
+        return []
+
+    @classmethod
+    def get_operational_param_default(cls, param: str) -> str:
+        """Preselect the ADC project when credentials identify one."""
+        if param == "project_id":
+            return init_discovery.default_project() or ""
+        if param == "region":
+            return cls.get_default_region()
+        return ""
+
+    @classmethod
+    def get_cli_extra_config_keys(cls) -> set[str]:
         """List additional template keys accepted from GCP CLI arguments."""
         return {"network", "subnetwork", "service_account_email", "service_account_scopes"}
 
-    def get_cli_infrastructure_defaults(self, args: argparse.Namespace) -> dict[str, Any]:
+    @classmethod
+    def get_cli_infrastructure_defaults(cls, args: argparse.Namespace) -> dict[str, Any]:
         """Extract infrastructure defaults from parsed GCP CLI arguments."""
         result: dict[str, Any] = {}
         if args.gcp_network:

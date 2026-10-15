@@ -14,6 +14,7 @@ from threading import Condition, RLock
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from orb.domain.base.ports import LoggingPort
+from orb.infrastructure.adapters.logging_adapter import LoggingAdapter
 from orb.infrastructure.di.injectable import injectable
 from orb.providers.azure.capabilities import (
     get_supported_api_capabilities,
@@ -28,6 +29,7 @@ from orb.providers.azure.infrastructure.error_utils import (
     canonical_azure_error_code,
     extract_azure_error_details,
 )
+from orb.providers.azure.services import init_discovery
 from orb.providers.azure.services.health_check_service import AzureHealthCheckService
 from orb.providers.azure.services.inventory_service import (
     AzureInventoryService,
@@ -424,36 +426,65 @@ class AzureProviderStrategy(ProviderStrategy):
         """Check Azure connectivity and return the current health status."""
         return self._health_check_service.check_health()
 
-    def get_available_credential_sources(self) -> list[dict]:
+    @classmethod
+    def get_available_credential_sources(cls) -> list[dict]:
         """Return Azure credential source options."""
-        return [{"name": None, "description": "DefaultAzureCredential / managed identity"}]
+        return [
+            {
+                "name": None,
+                "description": "DefaultAzureCredential / managed identity",
+                "config_delta": {},
+            }
+        ]
 
-    def get_credential_requirements(self) -> dict:
-        """Azure auth uses ambient credentials and does not require pre-auth prompts."""
-        return {}
+    @classmethod
+    def get_credential_requirements(cls) -> dict:
+        """Allow a user-assigned managed identity to be selected before auth."""
+        return {
+            "client_id": {
+                "required": False,
+                "prompt": True,
+                "description": "Managed identity client ID (optional)",
+            }
+        }
 
-    def get_operational_requirements(self) -> dict:
+    @classmethod
+    def get_operational_requirements(cls) -> dict:
         """Return the Azure values init must collect to build a working provider config."""
         return {
             "subscription_id": {"required": True, "description": "Azure subscription ID"},
             "resource_group": {"required": True, "description": "Azure resource group"},
             "region": {"required": True, "description": "Azure location"},
-            "client_id": {
-                "required": False,
-                "prompt": True,
-                "description": "Managed identity client ID (optional)",
-            },
         }
 
-    def get_default_region(self) -> str:
+    @classmethod
+    def get_contextual_operational_param_choices(
+        cls, param: str, selected_config: dict[str, Any]
+    ) -> list[tuple[str, str]]:
+        """Discover choices using the selected identity and subscription."""
+        client_id = selected_config.get("client_id")
+        if param == "subscription_id":
+            return init_discovery.list_subscriptions(client_id)
+        subscription_id = selected_config.get("subscription_id")
+        if not subscription_id:
+            return []
+        if param == "resource_group":
+            return init_discovery.list_resource_groups(client_id, subscription_id)
+        if param == "region":
+            return init_discovery.list_locations(client_id, subscription_id)
+        return []
+
+    @classmethod
+    def get_default_region(cls) -> str:
         """Return the default Azure location for CLI prompts."""
         return "eastus2"
 
-    def get_cli_provider_config(self, args: argparse.Namespace) -> dict[str, Any]:
+    @classmethod
+    def get_cli_provider_config(cls, args: argparse.Namespace) -> dict[str, Any]:
         """Extract Azure provider config from init CLI args."""
         args_dict = vars(args)
         provider_config: dict[str, Any] = {
-            "region": args_dict.get("azure_location") or self.get_default_region(),
+            "region": args_dict.get("azure_location") or cls.get_default_region(),
         }
 
         field_map = {
@@ -488,10 +519,12 @@ class AzureProviderStrategy(ProviderStrategy):
 
         return provider_config
 
-    def test_credentials(self, credential_source: Optional[str] = None, **kwargs) -> dict:
+    @classmethod
+    def test_credentials(cls, credential_source: Optional[str] = None, **kwargs) -> dict:
         """Validate Azure credentials by performing a health check."""
         del credential_source
-        health = self._health_check_service.check_health()
+        config = AzureProviderConfig.model_validate({"client_id": kwargs.get("client_id")})
+        health = AzureHealthCheckService(config=config, logger=LoggingAdapter()).check_health()
         return _credential_result_from_health(health)
 
     async def test_credentials_async(
@@ -506,7 +539,8 @@ class AzureProviderStrategy(ProviderStrategy):
         health = await self._health_check_service.check_health_async()
         return _credential_result_from_health(health)
 
-    def generate_provider_name(self, config: dict[str, Any]) -> str:
+    @classmethod
+    def generate_provider_name(cls, config: dict[str, Any]) -> str:
         """Generate Azure provider name."""
         subscription_id = config.get("subscription_id", "default")
         region = config.get("region", "eastus")

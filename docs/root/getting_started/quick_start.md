@@ -26,13 +26,19 @@ pip install -e ".[dev]"
 
 Run `orb init` to create the configuration directory and set up your first provider.
 
-By default, `orb init` runs interactively and discovers your AWS VPCs, subnets, and security groups:
+By default, `orb init` runs interactively. For AWS it discovers VPCs, subnets,
+and security groups. For Azure it lists subscriptions, then resource groups and
+locations for the selected subscription. For GCP it lists accessible projects
+and regions for the selected project, with the ADC project preselected when
+available. Each Azure and GCP choice also allows manual entry when listing is
+unavailable or the desired resource is not shown. If the GCP region API returns
+403, the wizard offers common regions marked as unverified:
 
 ```bash
 orb init
 ```
 
-For CI/CD pipelines or scripted environments, skip AWS discovery with `--non-interactive`:
+For CI/CD pipelines or scripted environments, skip interactive discovery with `--non-interactive`:
 
 ```bash
 orb init --non-interactive
