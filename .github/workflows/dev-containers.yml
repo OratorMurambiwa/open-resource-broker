@@ -196,7 +196,7 @@ jobs:
         key: ${{ steps.spa-web-cache.outputs.cache-primary-key }}
 
     - name: Upload wheel artifact
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
       with:
         name: container-wheel-${{ github.run_id }}
         path: dist/*.whl
@@ -246,7 +246,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Download wheel artifact
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
       with:
         name: container-wheel-${{ github.run_id }}
         path: dist/
@@ -359,7 +359,7 @@ jobs:
         trivyignores: .trivyignore.yaml
 
     - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+      uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
       if: always()
       with:
         sarif_file: 'trivy-results-py${{ matrix.python-version }}.sarif'
@@ -375,7 +375,7 @@ jobs:
 
     - name: Upload Hadolint scan results
       if: matrix.python-version == needs.config.outputs.default-python-version
-      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+      uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4.38.3
       with:
         sarif_file: hadolint-dockerfile.sarif
 
