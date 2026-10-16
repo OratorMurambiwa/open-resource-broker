@@ -16,14 +16,23 @@ from orb.domain.base.ports.console_port import ConsolePort
 from orb.domain.base.ports.provider_registry_port import ProviderRegistryPort
 from orb.infrastructure.logging.logger import get_logger
 from orb.infrastructure.registry.cli_spec_registry import CLISpecRegistry
+from orb.interface.provider_resource_release import (
+    release_provider_init_resources,
+    resolve_provider_strategy_class,
+)
 
 logger = get_logger(__name__)
+
+
+class InvalidInitInputError(ValueError):
+    """A value given on the command line was rejected by the provider's validation."""
 
 
 async def handle_init(args) -> int:
     """Handle orb init command."""
     container = args._container
     console = container.get(ConsolePort)
+    used_provider_types: set[str] = set()
     try:
         # Determine config directory
         if args.config_dir:
@@ -56,9 +65,9 @@ async def handle_init(args) -> int:
 
         # Get configuration
         if args.non_interactive:
-            config = _get_default_config(args, container)
+            config = _get_default_config(args, container, used_provider_types)
         else:
-            config = _interactive_setup(container)
+            config = _interactive_setup(container, used_provider_types)
 
         # Check if configuration was successful
         if not config:
@@ -107,6 +116,10 @@ async def handle_init(args) -> int:
     except (KeyboardInterrupt, EOFError):
         console.error("\nInitialization cancelled.")
         return 1
+    except InvalidInitInputError as e:
+        console.error(str(e))
+        logger.debug("Invalid init input: %s", e)
+        return 1
     except Exception as e:
         console.error("Failed to initialize ORB")
         console.error(f"  {e}")
@@ -115,6 +128,8 @@ async def handle_init(args) -> int:
         console.command("  orb init --force")
         logger.error("Failed to initialize ORB: %s", e, exc_info=True)
         return 1
+    finally:
+        release_provider_init_resources(container, used_provider_types)
 
 
 def _get_available_schedulers() -> list[dict[str, str]]:
@@ -162,8 +177,16 @@ def _get_available_providers(container: Any = None, registry: Any = None) -> lis
         return []
 
 
-def _interactive_setup(container: Any) -> Dict[str, Any]:
-    """Interactive configuration setup."""
+def _interactive_setup(
+    container: Any, used_provider_types: Optional[set[str]] = None
+) -> Dict[str, Any]:
+    """Interactive configuration setup.
+
+    Every provider type the operator selects is added to ``used_provider_types``
+    so the caller can release its init-scoped resources afterwards.
+    """
+    if used_provider_types is None:
+        used_provider_types = set()
     console = container.get(ConsolePort)
     try:
         console.separator(char="=", color="cyan")
@@ -206,6 +229,7 @@ def _interactive_setup(container: Any) -> Dict[str, Any]:
             provider_type = providers[int(provider_choice) - 1]["type"]
         except (ValueError, IndexError):
             provider_type = providers[0]["type"]
+        used_provider_types.add(provider_type)
 
         console.info("")
         console.separator(char="-", color="cyan")
@@ -306,7 +330,7 @@ def _interactive_setup(container: Any) -> Dict[str, Any]:
             if add_another not in ["y", "yes"]:
                 break
 
-            additional_provider = _configure_additional_provider(container)
+            additional_provider = _configure_additional_provider(container, used_provider_types)
             if additional_provider:
                 providers.append(additional_provider)
 
@@ -352,7 +376,9 @@ def _interactive_setup(container: Any) -> Dict[str, Any]:
         raise
 
 
-def _configure_additional_provider(container: Any) -> Optional[Dict[str, Any]]:
+def _configure_additional_provider(
+    container: Any, used_provider_types: Optional[set[str]] = None
+) -> Optional[Dict[str, Any]]:
     """Configure an additional provider instance."""
     console = container.get(ConsolePort)
     try:
@@ -373,6 +399,8 @@ def _configure_additional_provider(container: Any) -> Optional[Dict[str, Any]]:
             provider_type = providers[int(provider_choice) - 1]["type"]
         except (ValueError, IndexError):
             provider_type = providers[0]["type"]
+        if used_provider_types is not None:
+            used_provider_types.add(provider_type)
 
         # Provider configuration
         console.info("")
@@ -469,20 +497,7 @@ def _get_provider_strategy(
     avoids constructing a strategy before any provider configuration exists on
     disk.
     """
-    try:
-        if registry is None and container is not None:
-            from orb.domain.base.ports.provider_registry_port import ProviderRegistryPort
-
-            registry = container.get(ProviderRegistryPort)
-        if registry is None:
-            return None
-        # Ensure the provider type is registered so its class is available.
-        registry.ensure_provider_type_registered(provider_type)
-        reg = registry._get_type_registration(provider_type)
-        strategy_class = getattr(reg, "strategy_class", None)
-        return strategy_class
-    except Exception:
-        return None
+    return resolve_provider_strategy_class(provider_type, registry, container)
 
 
 def _prompt_operational_params(
@@ -731,7 +746,9 @@ def _discover_infrastructure(
         return {}
 
 
-def _get_default_config(args, container: Any) -> Dict[str, Any]:
+def _get_default_config(
+    args, container: Any, used_provider_types: Optional[set[str]] = None
+) -> Dict[str, Any]:
     """Get default configuration from args."""
     # Get first available provider as default
     providers = _get_available_providers(container)
@@ -740,6 +757,8 @@ def _get_default_config(args, container: Any) -> Dict[str, Any]:
     default_provider = providers[0]["type"] if providers else args.provider_type
 
     provider_type = args.provider_type or default_provider
+    if used_provider_types is not None:
+        used_provider_types.add(provider_type)
     strategy_class = _get_provider_strategy(provider_type, container=container)
     infrastructure_defaults = (
         strategy_class.get_cli_infrastructure_defaults(args) if strategy_class is not None else {}
@@ -760,6 +779,8 @@ def _get_default_config(args, container: Any) -> Dict[str, Any]:
             if provider_config.get(key) in (None, ""):
                 provider_config[key] = value
 
+    _validate_cli_operational_params(strategy_class, provider_config)
+
     first_provider = {
         "type": provider_type,
         "config": provider_config,
@@ -770,6 +791,22 @@ def _get_default_config(args, container: Any) -> Dict[str, Any]:
         "scheduler_type": args.scheduler or "default",
         "providers": [first_provider],
     }
+
+
+def _validate_cli_operational_params(
+    strategy_class: Optional[type], provider_config: Dict[str, Any]
+) -> None:
+    """Apply the provider's interactive input validation to values given as CLI arguments."""
+    validate = getattr(strategy_class, "validate_operational_param", None)
+    if validate is None or strategy_class is None:
+        return
+    for param in strategy_class.get_operational_requirements():  # type: ignore[attr-defined]
+        value = provider_config.get(param)
+        if value in (None, ""):
+            continue
+        error = validate(param, value, provider_config)
+        if error:
+            raise InvalidInitInputError(error)
 
 
 def _create_directories(config_dir: Path, work_dir: Path, logs_dir: Path):

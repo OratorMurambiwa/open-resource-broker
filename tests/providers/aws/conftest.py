@@ -158,6 +158,16 @@ def make_patch_moto_compat():
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_shared_aws_sessions():
+    """Drop init-scoped session/identity caches so tests never see each other's credentials."""
+    from orb.providers.aws.session_factory import clear_shared_sessions
+
+    clear_shared_sessions()
+    yield
+    clear_shared_sessions()
+
+
 @pytest.fixture(scope="function")
 def moto_aws():
     """Start moto mock_aws context for the duration of each test.

@@ -1,17 +1,19 @@
 """Read-only Azure account discovery for the interactive init wizard."""
 
-from orb.infrastructure.adapters.logging_adapter import LoggingAdapter
-from orb.providers.azure.infrastructure.credential_factory import create_default_azure_credential
+from orb.providers.azure.infrastructure.credential_factory import (
+    get_shared_default_azure_credential,
+    suppress_azure_identity_warnings,
+)
 
 
 def list_subscriptions(client_id: str | None) -> list[tuple[str, str]]:
     """List subscriptions visible to the selected Azure identity."""
     from azure.mgmt.resource.subscriptions import SubscriptionClient
 
-    credential = create_default_azure_credential(client_id=client_id, logger=LoggingAdapter())
+    credential = get_shared_default_azure_credential(client_id)
+    client = SubscriptionClient(credential)
     try:
-        client = SubscriptionClient(credential)
-        try:
+        with suppress_azure_identity_warnings():
             subscriptions = [
                 (
                     subscription.subscription_id,
@@ -20,38 +22,34 @@ def list_subscriptions(client_id: str | None) -> list[tuple[str, str]]:
                 for subscription in client.subscriptions.list()
                 if subscription.subscription_id
             ]
-            return sorted(subscriptions, key=lambda item: (item[1].casefold(), item[0]))
-        finally:
-            client.close()
+        return sorted(subscriptions, key=lambda item: (item[1].casefold(), item[0]))
     finally:
-        credential.close()
+        client.close()
 
 
 def list_resource_groups(client_id: str | None, subscription_id: str) -> list[tuple[str, str]]:
     """List resource groups in the selected subscription."""
     from azure.mgmt.resource.resources import ResourceManagementClient
 
-    credential = create_default_azure_credential(client_id=client_id, logger=LoggingAdapter())
+    credential = get_shared_default_azure_credential(client_id)
+    client = ResourceManagementClient(credential, subscription_id)
     try:
-        client = ResourceManagementClient(credential, subscription_id)
-        try:
+        with suppress_azure_identity_warnings():
             return sorted(
                 (group.name, group.name) for group in client.resource_groups.list() if group.name
             )
-        finally:
-            client.close()
     finally:
-        credential.close()
+        client.close()
 
 
 def list_locations(client_id: str | None, subscription_id: str) -> list[tuple[str, str]]:
     """List locations available to the selected subscription."""
     from azure.mgmt.resource.subscriptions import SubscriptionClient
 
-    credential = create_default_azure_credential(client_id=client_id, logger=LoggingAdapter())
+    credential = get_shared_default_azure_credential(client_id)
+    client = SubscriptionClient(credential)
     try:
-        client = SubscriptionClient(credential)
-        try:
+        with suppress_azure_identity_warnings():
             return sorted(
                 (location.name, location.display_name or location.name)
                 for location in client.subscriptions.list_locations(subscription_id)
@@ -59,7 +57,5 @@ def list_locations(client_id: str | None, subscription_id: str) -> list[tuple[st
                 and location.metadata is not None
                 and location.metadata.region_type == "Physical"
             )
-        finally:
-            client.close()
     finally:
-        credential.close()
+        client.close()

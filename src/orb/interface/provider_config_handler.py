@@ -8,6 +8,7 @@ from orb.config.platform_dirs import get_config_location
 from orb.infrastructure.error.decorators import handle_interface_exceptions
 from orb.infrastructure.logging.logger import get_logger
 from orb.infrastructure.registry.cli_spec_registry import CLISpecRegistry
+from orb.interface.provider_resource_release import release_provider_init_resources
 from orb.interface.response_formatting_service import ResponseFormattingService
 
 logger = get_logger(__name__)
@@ -16,6 +17,7 @@ logger = get_logger(__name__)
 @handle_interface_exceptions(context="provider_add", interface_type="cli")
 async def handle_provider_add(args) -> dict[str, Any]:
     """Handle orb providers add command."""
+    provider_type = None
     try:
         config_file = get_config_location() / "config.json"
         if not config_file.exists():
@@ -97,6 +99,9 @@ async def handle_provider_add(args) -> dict[str, Any]:
     except Exception as e:
         logger.error("Failed to add provider: %s", e, exc_info=True)
         return {"error": True, "message": f"Failed to add provider: {e}", "exit_code": 1}
+    finally:
+        if provider_type:
+            release_provider_init_resources(getattr(args, "_container", None), {provider_type})
 
 
 @handle_interface_exceptions(context="provider_remove", interface_type="cli")
@@ -138,6 +143,7 @@ async def handle_provider_remove(args) -> dict[str, Any]:
 @handle_interface_exceptions(context="provider_update", interface_type="cli")
 async def handle_provider_update(args) -> dict[str, Any]:
     """Handle orb providers update command."""
+    provider_type = ""
     try:
         config_file = get_config_location() / "config.json"
         if not config_file.exists():
@@ -192,6 +198,9 @@ async def handle_provider_update(args) -> dict[str, Any]:
     except Exception as e:
         logger.error("Failed to update provider: %s", e, exc_info=True)
         return {"error": True, "message": f"Failed to update provider: {e}", "exit_code": 1}
+    finally:
+        if provider_type:
+            release_provider_init_resources(getattr(args, "_container", None), {provider_type})
 
 
 @handle_interface_exceptions(context="provider_set_default", interface_type="cli")

@@ -1,5 +1,7 @@
 """Azure and GCP init inquiries must work before provider instances exist."""
 
+import argparse
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,8 +11,11 @@ import orb.interface.init_command_handler as init_handler
 from orb.providers.azure.configuration.config import AzureProviderConfig
 from orb.providers.azure.strategy.azure_provider_strategy import AzureProviderStrategy
 from orb.providers.gcp.configuration.config import GCPProviderConfig
-from orb.providers.gcp.services.health_check_service import GCPHealthCheckService
 from orb.providers.gcp.strategy.gcp_provider_strategy import GCPProviderStrategy
+
+_SHARED_AZURE_CREDENTIAL = (
+    "orb.providers.azure.strategy.azure_provider_strategy.get_shared_default_azure_credential"
+)
 
 
 @pytest.fixture(params=[("azure", AzureProviderStrategy), ("gcp", GCPProviderStrategy)])
@@ -31,14 +36,12 @@ def _mock_init_credentials(strategy, monkeypatch):
 def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) -> None:
     provider_type, strategy, container = init_container
     if strategy is AzureProviderStrategy:
-        token_provider = MagicMock()
-        monkeypatch.setattr(
-            "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
-            token_provider,
-        )
+        monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, MagicMock())
     else:
-        authenticate = MagicMock(return_value="example-project")
-        monkeypatch.setattr(GCPHealthCheckService, "authenticate", authenticate)
+        monkeypatch.setattr(
+            "orb.providers.gcp.services.init_discovery.cached_default_credentials",
+            MagicMock(return_value=(MagicMock(), "example-project")),
+        )
 
     sources = init_handler._get_available_credential_sources(provider_type, container)
     assert sources and all("config_delta" in source for source in sources)
@@ -58,8 +61,7 @@ def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) 
 
 def test_gcp_init_reports_authentication_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        GCPHealthCheckService,
-        "authenticate",
+        "orb.providers.gcp.services.init_discovery.cached_default_credentials",
         MagicMock(side_effect=RuntimeError("ADC unavailable")),
     )
 
@@ -69,27 +71,33 @@ def test_gcp_init_reports_authentication_failure(monkeypatch) -> None:
 
 
 def test_azure_init_uses_selected_managed_identity(monkeypatch) -> None:
-    token_provider = MagicMock()
-    monkeypatch.setattr(
-        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
-        token_provider,
-    )
+    shared_credential = MagicMock()
+    monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, shared_credential)
 
     result = AzureProviderStrategy.test_credentials(client_id="managed-identity-id")
 
     assert result == {"success": True}
-    assert token_provider.call_args.kwargs["client_id"] == "managed-identity-id"
+    assert shared_credential.call_args.args[0] == "managed-identity-id"
+    shared_credential.return_value.get_token.assert_called_once_with(
+        "https://management.azure.com/.default"
+    )
+
+
+def test_azure_init_leaves_the_shared_credential_open(monkeypatch) -> None:
+    shared_credential = MagicMock()
+    monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, shared_credential)
+
+    AzureProviderStrategy.test_credentials()
+
+    shared_credential.return_value.close.assert_not_called()
 
 
 def test_azure_init_reports_one_line_authentication_error(monkeypatch) -> None:
-    token_provider = MagicMock()
-    token_provider.return_value.get_access_token.side_effect = RuntimeError(
+    shared_credential = MagicMock()
+    shared_credential.return_value.get_token.side_effect = RuntimeError(
         "Credential chain failed\nDetailed SDK diagnostics"
     )
-    monkeypatch.setattr(
-        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
-        token_provider,
-    )
+    monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, shared_credential)
 
     assert AzureProviderStrategy.test_credentials() == {
         "success": False,
@@ -98,17 +106,58 @@ def test_azure_init_reports_one_line_authentication_error(monkeypatch) -> None:
 
 
 def test_azure_init_reports_missing_extra(monkeypatch) -> None:
-    token_provider = MagicMock()
-    token_provider.return_value.get_access_token.side_effect = ImportError("No module named azure")
     monkeypatch.setattr(
-        "orb.providers.azure.strategy.azure_provider_strategy.DefaultAzureAccessTokenProvider",
-        token_provider,
+        _SHARED_AZURE_CREDENTIAL, MagicMock(side_effect=ImportError("No module named azure"))
     )
 
     assert AzureProviderStrategy.test_credentials() == {
         "success": False,
         "error": "Install orb-py[azure] to use Azure init.",
     }
+
+
+def test_azure_init_hides_credential_chain_warnings_and_restores_the_level(
+    monkeypatch, caplog
+) -> None:
+    identity_logger = logging.getLogger("azure.identity")
+    chain_logger = logging.getLogger("azure.identity._credentials.chained")
+    previous = identity_logger.level
+    identity_logger.setLevel(logging.INFO)
+
+    def failing_get_token(*_scopes):
+        chain_logger.warning("DefaultAzureCredential failed to retrieve a token")
+        raise RuntimeError("Credential chain failed")
+
+    shared_credential = MagicMock()
+    shared_credential.return_value.get_token.side_effect = failing_get_token
+    monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, shared_credential)
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = AzureProviderStrategy.test_credentials()
+
+        assert result["success"] is False
+        assert "failed to retrieve a token" not in caplog.text
+        assert identity_logger.level == logging.INFO
+    finally:
+        identity_logger.setLevel(previous)
+
+
+def test_azure_release_closes_the_shared_credential_once(monkeypatch) -> None:
+    from orb.providers.azure.infrastructure.credential_factory import (
+        get_shared_default_azure_credential,
+    )
+
+    credential = MagicMock()
+    monkeypatch.setattr(
+        "orb.providers.azure.infrastructure.credential_factory.create_default_azure_credential",
+        MagicMock(return_value=credential),
+    )
+    get_shared_default_azure_credential(None)
+
+    AzureProviderStrategy.release_init_resources()
+    AzureProviderStrategy.release_init_resources()
+
+    credential.close.assert_called_once_with()
 
 
 def test_gcp_init_rejects_invalid_manual_project_and_region() -> None:
@@ -534,3 +583,112 @@ def test_discovery_passes_only_provider_config_to_strict_models(
     strategy.discover_infrastructure_interactive.assert_called_once_with(
         {"type": provider_type, "config": config_values}
     )
+
+
+def _azure_cli_args(**overrides) -> argparse.Namespace:
+    values = {
+        "provider_type": "azure",
+        "scheduler": None,
+        "azure_location": None,
+        "azure_subscription_id": "00000000-0000-0000-0000-000000000001",
+        "azure_resource_group": "workers",
+        "azure_client_id": None,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_non_interactive_init_rejects_azure_display_name_location() -> None:
+    registry = MagicMock()
+    registry._get_type_registration.return_value = MagicMock(strategy_class=AzureProviderStrategy)
+    container = MagicMock()
+    container.get.return_value = registry
+
+    with pytest.raises(ValueError, match="eastus2"):
+        init_handler._get_default_config(_azure_cli_args(azure_location="East US 2"), container)
+
+    config = init_handler._get_default_config(_azure_cli_args(azure_location="uksouth"), container)
+    assert config["providers"][0]["config"]["region"] == "uksouth"
+
+
+def test_azure_validation_message_has_no_pydantic_prefix() -> None:
+    message = AzureProviderStrategy.validate_operational_param("region", "East US 2", {})
+
+    assert message is not None
+    assert not message.startswith("Value error")
+    assert "eastus2" in message
+
+
+@pytest.fixture
+def gcp_cli_container():
+    from orb.infrastructure.registry.cli_spec_registry import CLISpecRegistry
+    from orb.providers.gcp.cli.gcp_cli_spec import GCPCLISpec
+
+    CLISpecRegistry.register("gcp", GCPCLISpec())
+    registry = MagicMock()
+    registry._get_type_registration.return_value = MagicMock(strategy_class=GCPProviderStrategy)
+    container = MagicMock()
+    container.get.return_value = registry
+    yield container
+    CLISpecRegistry.clear()
+
+
+def _gcp_cli_args(project_id, region) -> argparse.Namespace:
+    return argparse.Namespace(
+        provider_type="gcp",
+        scheduler=None,
+        gcp_project_id=project_id,
+        gcp_region=region,
+        gcp_zones=None,
+        gcp_network=None,
+        gcp_subnetwork=None,
+        gcp_service_account_email=None,
+        gcp_service_account_scopes=None,
+    )
+
+
+def test_non_interactive_gcp_init_accepts_valid_project_and_region(gcp_cli_container) -> None:
+    config = init_handler._get_default_config(
+        _gcp_cli_args("example-project", "europe-west2"), gcp_cli_container
+    )
+
+    assert config["providers"][0]["config"] == {
+        "project_id": "example-project",
+        "region": "europe-west2",
+    }
+
+
+@pytest.mark.parametrize(
+    ("project_id", "region"), [("a/b?x", "europe-west2"), ("example-project", "bad region")]
+)
+def test_non_interactive_gcp_init_rejects_invalid_project_or_region(
+    gcp_cli_container, project_id, region
+) -> None:
+    with pytest.raises(init_handler.InvalidInitInputError):
+        init_handler._get_default_config(_gcp_cli_args(project_id, region), gcp_cli_container)
+
+
+def test_invalid_cli_value_is_reported_without_an_error_traceback(tmp_path, caplog) -> None:
+    import asyncio
+
+    registry = MagicMock()
+    registry._get_type_registration.return_value = MagicMock(strategy_class=AzureProviderStrategy)
+    console = MagicMock()
+    container = MagicMock()
+    container.get.side_effect = lambda port: console if port.__name__ == "ConsolePort" else registry
+    args = _azure_cli_args(
+        azure_location="East US 2",
+        _container=container,
+        config_dir=str(tmp_path / "config"),
+        scripts_dir=None,
+        force=True,
+        non_interactive=True,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(init_handler.handle_init(args)) == 1
+
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    console.error.assert_called_once()
+    assert "eastus2" in console.error.call_args.args[0]
+    assert "Value error" not in console.error.call_args.args[0]

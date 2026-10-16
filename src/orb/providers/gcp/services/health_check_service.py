@@ -82,8 +82,22 @@ class GCPHealthCheckService:
         if is_dry_run_active():
             return {"success": True}
         try:
-            return {"success": True, "project_id": cls.authenticate()}
+            import google.auth.transport.requests
+
+            from orb.providers.gcp.services.init_discovery import cached_default_credentials
+
+            # Credentials are shared with the discovery steps that follow; the
+            # runtime health check keeps resolving them afresh via authenticate().
+            credentials, project = cached_default_credentials()
+            credentials.refresh(google.auth.transport.requests.Request())
+            return {"success": True, "project_id": project}
+        except ImportError:
+            return {"success": False, "error": "Install orb-py[gcp] to use GCP init."}
         except Exception as exc:
+            # Drop the cached credentials so a retry in the same run re-resolves them.
+            from orb.providers.gcp.services.init_discovery import clear_default_credentials
+
+            clear_default_credentials()
             return {"success": False, "error": f"GCP credential check failed: {exc!s}"}
 
     @classmethod
