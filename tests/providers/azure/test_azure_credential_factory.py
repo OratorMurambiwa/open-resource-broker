@@ -300,6 +300,9 @@ def test_suppress_azure_identity_warnings_restores_the_previous_level():
         suppress_azure_identity_warnings,
     )
 
+    def _fail() -> None:
+        raise RuntimeError("boom")
+
     identity_logger = logging.getLogger("azure.identity")
     chain_logger = logging.getLogger("azure.identity._credentials.chained")
     previous = identity_logger.level
@@ -312,7 +315,7 @@ def test_suppress_azure_identity_warnings_restores_the_previous_level():
 
         with pytest.raises(RuntimeError):
             with suppress_azure_identity_warnings():
-                raise RuntimeError("boom")
+                _fail()
         assert identity_logger.level == logging.INFO
     finally:
         identity_logger.setLevel(previous)

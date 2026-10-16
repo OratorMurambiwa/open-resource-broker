@@ -463,7 +463,7 @@ class TestCredentialProbeLeavesSharedClientUntouched:
     def test_failed_probe_is_not_cached_so_a_retry_reloads_credentials(self) -> None:
         with (
             patch("kubernetes.config.load_kube_config") as load,
-            patch("kubernetes.client.api_client.ApiClient", side_effect=lambda: MagicMock()),
+            patch("kubernetes.client.api_client.ApiClient", side_effect=MagicMock),
             patch(
                 "kubernetes.client.CoreV1Api.get_api_resources",
                 side_effect=[RuntimeError("token expired"), MagicMock(resources=[])],

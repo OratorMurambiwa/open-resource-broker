@@ -101,12 +101,19 @@ def run_cli_init(
 
     config_file = tmp_path / "config" / "config.json"
     argv = ["orb", "init", "--force", "--config-dir", str(config_file.parent)]
-    saved_console = os.environ.get("ORB_LOG_CONSOLE_ENABLED")
-    os.environ["ORB_LOG_CONSOLE_ENABLED"] = "false"
+    isolated_env = {
+        "ORB_LOG_CONSOLE_ENABLED": "false",
+        "ORB_ROOT_DIR": str(tmp_path),
+        "ORB_CONFIG_DIR": str(config_file.parent),
+        "ORB_WORK_DIR": str(tmp_path / "work"),
+        "ORB_LOG_DIR": str(tmp_path / "logs"),
+        "ORB_HEALTH_DIR": str(tmp_path / "health"),
+    }
     reset_container()
     code = 0
     try:
         with (
+            patch.dict(os.environ, isolated_env),
             patch.object(sys, "argv", argv),
             patch("builtins.input", scripted_input(provider_type, answers)),
         ):
@@ -116,8 +123,4 @@ def run_cli_init(
                 code = exit_.code if isinstance(exit_.code, int) else 1
     finally:
         reset_container()
-        if saved_console is None:
-            os.environ.pop("ORB_LOG_CONSOLE_ENABLED", None)
-        else:
-            os.environ["ORB_LOG_CONSOLE_ENABLED"] = saved_console
     return code, json.loads(config_file.read_text()) if config_file.exists() else {}

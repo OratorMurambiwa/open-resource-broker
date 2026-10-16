@@ -49,8 +49,16 @@ async def test_cli_init_writes_k8s_config_and_loads_kubeconfig_once(
     (kube_dir / "config").write_text(_KUBECONFIG.format(server=str(kmock_k8s.url).rstrip("/")))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("KUBECONFIG", raising=False)
+    # The default location is computed at import time from the shell's KUBECONFIG.
+    monkeypatch.setattr(
+        kubernetes.config.kube_config, "KUBE_CONFIG_DEFAULT_LOCATION", str(kube_dir / "config")
+    )
 
-    kmock_k8s["get /api/v1/"] << {"kind": "APIResourceList", "groupVersion": "v1", "resources": []}
+    _ = kmock_k8s["get /api/v1/"] << {
+        "kind": "APIResourceList",
+        "groupVersion": "v1",
+        "resources": [],
+    }
     kmock_k8s.objects[kmock.resource("", "v1", "serviceaccounts"), "default", "orb"] = {
         "apiVersion": "v1",
         "kind": "ServiceAccount",

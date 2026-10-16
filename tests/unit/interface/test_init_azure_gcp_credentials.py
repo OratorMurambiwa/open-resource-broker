@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,11 +30,25 @@ def init_container(request):
     return provider_type, strategy, container
 
 
+@pytest.fixture
+def fake_google_auth_transport(monkeypatch):
+    """Stand in for google-auth so the GCP check runs without the gcp extra."""
+    for name in (
+        "google",
+        "google.auth",
+        "google.auth.transport",
+        "google.auth.transport.requests",
+    ):
+        monkeypatch.setitem(sys.modules, name, MagicMock())
+
+
 def _mock_init_credentials(strategy, monkeypatch):
     monkeypatch.setattr(strategy, "test_credentials", lambda *_args, **_kwargs: {"success": True})
 
 
-def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) -> None:
+def test_init_credentials_work_from_strategy_class(
+    init_container, monkeypatch, fake_google_auth_transport
+) -> None:
     provider_type, strategy, container = init_container
     if strategy is AzureProviderStrategy:
         monkeypatch.setattr(_SHARED_AZURE_CREDENTIAL, MagicMock())
@@ -59,7 +74,7 @@ def test_init_credentials_work_from_strategy_class(init_container, monkeypatch) 
     assert error == ""
 
 
-def test_gcp_init_reports_authentication_failure(monkeypatch) -> None:
+def test_gcp_init_reports_authentication_failure(monkeypatch, fake_google_auth_transport) -> None:
     monkeypatch.setattr(
         "orb.providers.gcp.services.init_discovery.cached_default_credentials",
         MagicMock(side_effect=RuntimeError("ADC unavailable")),
