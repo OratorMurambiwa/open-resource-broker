@@ -28,7 +28,12 @@ from orb.providers.azure.configuration.validator import validate_azure_template
 from orb.providers.azure.domain.template.azure_template_aggregate import AzureTemplate
 from orb.providers.azure.domain.template.value_objects import AzureProviderApi
 from orb.providers.azure.exceptions import AzureError, AzureValidationError
-from orb.providers.azure.infrastructure.credential_factory import DefaultAzureAccessTokenProvider
+from orb.providers.azure.infrastructure.credential_factory import (
+    AzureCredentialAccessTokenProvider,
+    close_shared_credentials,
+    get_shared_default_azure_credential,
+    suppress_azure_identity_warnings,
+)
 from orb.providers.azure.infrastructure.error_utils import (
     canonical_azure_error_code,
     extract_azure_error_details,
@@ -497,7 +502,7 @@ class AzureProviderStrategy(ProviderStrategy):
         try:
             AzureProviderConfig.model_validate({param: value})
         except ValidationError as exc:
-            return str(exc.errors()[0]["msg"])
+            return str(exc.errors()[0]["msg"]).removeprefix("Value error, ")
         return None
 
     @classmethod
@@ -547,15 +552,24 @@ class AzureProviderStrategy(ProviderStrategy):
         if is_dry_run_active():
             return {"success": True}
         try:
-            DefaultAzureAccessTokenProvider(
-                client_id=kwargs.get("client_id"), logger=LoggingAdapter()
-            ).get_access_token("https://management.azure.com/.default")
+            # The credential is shared with the discovery steps that follow and
+            # closed by ``release_init_resources`` when the init run ends.
+            credential = get_shared_default_azure_credential(kwargs.get("client_id"))
+            with suppress_azure_identity_warnings():
+                AzureCredentialAccessTokenProvider(credential).get_access_token(
+                    "https://management.azure.com/.default"
+                )
             return {"success": True}
         except ImportError:
             return {"success": False, "error": "Install orb-py[azure] to use Azure init."}
         except Exception as exc:
             LoggingAdapter().debug("Azure init authentication failed: %s", exc, exc_info=True)
             return {"success": False, "error": str(exc).splitlines()[0] or type(exc).__name__}
+
+    @classmethod
+    def release_init_resources(cls) -> None:
+        """Close the credentials shared by the init run's credential check and discovery."""
+        close_shared_credentials()
 
     async def test_credentials_async(
         self, credential_source: Optional[str] = None, **kwargs

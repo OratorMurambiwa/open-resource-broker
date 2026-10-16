@@ -11,7 +11,7 @@ being actively reworked to an async variant on another branch).
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -958,7 +958,8 @@ def test_register_health_checks_registers_when_default_instance(monkeypatch):
     monkeypatch.setattr("orb.providers.aws.health.register_aws_health_checks", register_mock)
     health_check = MagicMock()
     strategy.register_health_checks(health_check)
-    register_mock.assert_called_once_with(health_check, aws_client, "json", kind="readiness")
+    register_mock.assert_called_once_with(health_check, ANY, "json", kind="readiness")
+    assert register_mock.call_args.args[1]() is aws_client
 
 
 def test_register_health_checks_falls_back_to_defaults_on_config_port_errors(monkeypatch):
@@ -985,7 +986,8 @@ def test_register_health_checks_falls_back_to_defaults_on_config_port_errors(mon
     health_check = MagicMock()
     strategy.register_health_checks(health_check)
 
-    register_mock.assert_called_once_with(health_check, aws_client, "json", kind="liveness")
+    register_mock.assert_called_once_with(health_check, ANY, "json", kind="liveness")
+    assert register_mock.call_args.args[1]() is aws_client
 
 
 # ---------------------------------------------------------------------------
@@ -1311,3 +1313,36 @@ def test_str_includes_region_and_initialized_state():
     rendered = str(strategy)
     assert "us-east-1" in rendered
     assert "initialized=False" in rendered
+
+
+def test_register_health_checks_builds_the_client_once_under_concurrent_checks():
+    import threading
+    import time
+
+    built = []
+
+    def resolver():
+        built.append(1)
+        time.sleep(0.1)
+        client = MagicMock()
+        client.sts_client.get_caller_identity.return_value = {
+            "Account": "1",
+            "UserId": "u",
+            "Arn": "a",
+        }
+        return client
+
+    strategy = _make_strategy(aws_client_resolver=resolver)
+    checks = {}
+    health_check = MagicMock()
+    health_check.register_check.side_effect = lambda name, fn, **_: checks.update({name: fn})
+    strategy.register_health_checks(health_check)
+    assert built == []
+
+    threads = [threading.Thread(target=checks["aws"]) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(built) == 1

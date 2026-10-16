@@ -341,6 +341,17 @@ class ProviderStrategy(ABC):
         return {"success": False, "error": "Credential testing not implemented"}
 
     @classmethod
+    def release_init_resources(cls) -> None:
+        """Release init-scoped state for this provider.
+
+        Called once at the end of every ``orb init`` run for each provider type
+        used.  Providers that cache credentials or clients while the wizard
+        runs clear those caches and close any open resources here.  The default
+        implementation does nothing.
+        """
+        pass
+
+    @classmethod
     def get_credential_requirements(cls) -> dict:
         """Get required credential parameters for this provider.
 

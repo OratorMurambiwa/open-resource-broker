@@ -718,7 +718,11 @@ class AWSProviderStrategy(ProviderStrategy):
         profile = config.get("profile", self._aws_config.profile)
 
         infrastructure_service = AWSInfrastructureDiscoveryService(
-            region=region, profile=profile, logger=self._logger, console=self._console
+            region=region,
+            profile=profile,
+            logger=self._logger,
+            console=self._console,
+            use_shared_session=True,
         )
         return infrastructure_service.discover_infrastructure_interactive(provider_config)
 
@@ -769,6 +773,13 @@ class AWSProviderStrategy(ProviderStrategy):
         return await asyncio.to_thread(
             AWSSessionFactory.discover_credentials, credential_source, region
         )
+
+    @classmethod
+    def release_init_resources(cls) -> None:
+        """Drop the sessions and identities cached for the init run."""
+        from orb.providers.aws.session_factory import clear_shared_sessions
+
+        clear_shared_sessions()
 
     @classmethod
     def get_credential_requirements(cls) -> dict:
@@ -890,9 +901,9 @@ class AWSProviderStrategy(ProviderStrategy):
         caller today, but the gate is applied here so a future re-wire cannot
         silently reintroduce secondary-provider status drag.
         """
-        if self.aws_client is None:
+        if self._aws_client is None and not (self._aws_client_resolver or self._config_port):
             return
-        from orb.providers.aws.health import register_aws_health_checks
+        from orb.providers.aws.health import lazy_aws_client_getter, register_aws_health_checks
         from orb.providers.health_scoping import (
             connectivity_check_kind,
             is_default_provider_instance,
@@ -919,7 +930,7 @@ class AWSProviderStrategy(ProviderStrategy):
 
         register_aws_health_checks(
             health_check,
-            self.aws_client,
+            lazy_aws_client_getter(lambda: self.aws_client),
             storage_strategy,
             kind=connectivity_check_kind(provider_cfg),
         )

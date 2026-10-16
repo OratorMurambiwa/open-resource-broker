@@ -150,3 +150,55 @@ def test_region_request_quotes_free_text_project_id(monkeypatch) -> None:
 
     assert init_discovery.list_regions("a/b?x") == []
     assert "/projects/a%2Fb%3Fx/regions" in session.get.call_args.args[0]
+
+
+def test_discovery_calls_share_one_adc_resolution(monkeypatch) -> None:
+    credentials = object()
+    auth_default = MagicMock(return_value=(credentials, "selected-project"))
+    monkeypatch.setattr("google.auth.default", auth_default)
+    session_cls = MagicMock()
+    session_cls.return_value.get.return_value.json.return_value = {"items": [], "projects": []}
+    monkeypatch.setattr("google.auth.transport.requests.AuthorizedSession", session_cls)
+
+    assert init_discovery.default_project() == "selected-project"
+    init_discovery.list_projects()
+    init_discovery.list_regions("selected-project")
+    assert init_discovery.default_project() == "selected-project"
+
+    auth_default.assert_called_once_with(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    assert [call.args[0] for call in session_cls.call_args_list] == [credentials, credentials]
+
+
+def test_failed_adc_resolution_is_not_cached(monkeypatch) -> None:
+    auth_default = MagicMock(side_effect=[RuntimeError("ADC unavailable"), (object(), "project")])
+    monkeypatch.setattr("google.auth.default", auth_default)
+
+    with pytest.raises(RuntimeError):
+        init_discovery.default_project()
+
+    assert init_discovery.default_project() == "project"
+    assert auth_default.call_count == 2
+
+
+def test_clearing_forces_a_fresh_adc_resolution(monkeypatch) -> None:
+    auth_default = MagicMock(return_value=(object(), "project"))
+    monkeypatch.setattr("google.auth.default", auth_default)
+
+    init_discovery.default_project()
+    init_discovery.clear_default_credentials()
+    init_discovery.default_project()
+
+    assert auth_default.call_count == 2
+
+
+def test_release_hook_clears_cached_adc(monkeypatch) -> None:
+    from orb.providers.gcp.strategy.gcp_provider_strategy import GCPProviderStrategy
+
+    auth_default = MagicMock(return_value=(object(), "project"))
+    monkeypatch.setattr("google.auth.default", auth_default)
+
+    init_discovery.default_project()
+    GCPProviderStrategy.release_init_resources()
+    init_discovery.default_project()
+
+    assert auth_default.call_count == 2

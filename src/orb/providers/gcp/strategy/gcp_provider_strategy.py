@@ -638,6 +638,11 @@ class GCPProviderStrategy(ProviderStrategy):
         return GCPHealthCheckService.test_credentials(credential_source, **kwargs)
 
     @classmethod
+    def release_init_resources(cls) -> None:
+        """Drop the Application Default Credentials cached for the init run."""
+        init_discovery.clear_default_credentials()
+
+    @classmethod
     def get_credential_requirements(cls) -> dict:
         """Return the credential requirements for the GCP provider."""
         return GCPHealthCheckService.get_credential_requirements()
@@ -707,7 +712,7 @@ class GCPProviderStrategy(ProviderStrategy):
         try:
             GCPProviderConfig.model_validate(config)
         except ValidationError as exc:
-            return str(exc.errors()[0]["msg"])
+            return str(exc.errors()[0]["msg"]).removeprefix("Value error, ")
         return None
 
     @classmethod

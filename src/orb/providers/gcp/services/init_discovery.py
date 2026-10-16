@@ -1,5 +1,6 @@
 """Read-only GCP account discovery for the interactive init wizard."""
 
+import threading
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
@@ -7,20 +8,42 @@ from urllib.parse import quote
 _DISCOVERY_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 _MAX_DISCOVERY_PAGES = 100
 
+# Application Default Credentials are static for the life of the process, so one
+# ``orb init`` run resolves them once.  Only a successful resolution is stored;
+# ``clear_default_credentials`` drops it when the run ends so long-running
+# processes never hold init-cached credentials.
+_adc_lock = threading.Lock()
+_adc: tuple[Any, str | None] | None = None
+
+
+def cached_default_credentials() -> tuple[Any, str | None]:
+    """Return ``(credentials, project_id)`` from ADC, resolving them on first use."""
+    global _adc
+    with _adc_lock:
+        if _adc is None:
+            import google.auth
+
+            _adc = google.auth.default(scopes=[_DISCOVERY_SCOPE])
+        return _adc
+
+
+def clear_default_credentials() -> None:
+    """Forget the cached Application Default Credentials."""
+    global _adc
+    with _adc_lock:
+        _adc = None
+
 
 def default_project() -> str | None:
     """Return the project selected by Application Default Credentials, if any."""
-    import google.auth
-
-    _, project_id = google.auth.default(scopes=[_DISCOVERY_SCOPE])
+    _, project_id = cached_default_credentials()
     return project_id
 
 
 def _list_pages(url: str) -> Iterator[dict[str, Any]]:
-    import google.auth
     from google.auth.transport.requests import AuthorizedSession
 
-    credentials, _ = google.auth.default(scopes=[_DISCOVERY_SCOPE])
+    credentials, _ = cached_default_credentials()
     session = AuthorizedSession(credentials)
     try:
         page_token = ""

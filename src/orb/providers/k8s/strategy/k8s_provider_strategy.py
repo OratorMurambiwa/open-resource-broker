@@ -1051,6 +1051,13 @@ class K8sProviderStrategy(ProviderStrategy):
         return K8sCapabilityService.test_credentials(credential_source, **kwargs)
 
     @classmethod
+    def release_init_resources(cls) -> None:
+        """Drop the kubeconfig loads, ApiClients and context listings cached for the init run."""
+        from orb.providers.k8s.auth.kubeconfig import clear_shared_kube_state
+
+        clear_shared_kube_state()
+
+    @classmethod
     def get_credential_requirements(cls) -> dict:
         """Document the Kubernetes credential parameters operators may set."""
         return K8sCapabilityService.get_credential_requirements()
