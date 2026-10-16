@@ -29,11 +29,7 @@ class GCPHealthCheckService:
             )
 
         try:
-            import google.auth
-            import google.auth.transport.requests
-
-            credentials, project = google.auth.default()
-            credentials.refresh(google.auth.transport.requests.Request())
+            project = self.authenticate()
 
             response_time_ms = (time.time() - start_time) * 1000
             return ProviderHealthStatus.healthy(
@@ -56,37 +52,47 @@ class GCPHealthCheckService:
                 },
             )
 
-    def get_available_credential_sources(self) -> list[dict]:
+    @staticmethod
+    def authenticate() -> str | None:
+        """Refresh Application Default Credentials and return their project."""
+        import google.auth
+        import google.auth.transport.requests
+
+        credentials, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        credentials.refresh(google.auth.transport.requests.Request())
+        return project
+
+    @classmethod
+    def get_available_credential_sources(cls) -> list[dict]:
         """Return supported credential sources."""
         return [
             {
                 "name": "adc",
                 "description": "Application Default Credentials / workload identity",
+                "config_delta": {},
             }
         ]
 
-    def test_credentials(self, credential_source: Optional[str] = None, **kwargs) -> dict:
+    @classmethod
+    def test_credentials(cls, credential_source: Optional[str] = None, **kwargs) -> dict:
         """Test ADC availability without fetching real SDK clients."""
         del credential_source, kwargs
-        status = self.check_health()
-        if status.is_healthy:
-            return {"success": True, "project_id": self._config.project_id}
-        return {
-            "success": False,
-            "error": status.status_message,
-            "details": status.error_details or {},
-        }
+        if is_dry_run_active():
+            return {"success": True}
+        try:
+            return {"success": True, "project_id": cls.authenticate()}
+        except Exception as exc:
+            return {"success": False, "error": f"GCP credential check failed: {exc!s}"}
 
-    def get_credential_requirements(self) -> dict:
+    @classmethod
+    def get_credential_requirements(cls) -> dict:
         """Describe GCP auth requirements."""
-        return {
-            "application_default_credentials": {
-                "required": True,
-                "description": "GCP provider uses Application Default Credentials only",
-            }
-        }
+        return {}
 
-    def get_operational_requirements(self) -> dict:
+    @classmethod
+    def get_operational_requirements(cls) -> dict:
         """Describe non-secret operational requirements."""
         return {
             "project_id": {"required": True, "description": "GCP project ID"},

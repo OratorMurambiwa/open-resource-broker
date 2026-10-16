@@ -3752,6 +3752,8 @@ test-azure = [
     { name = "azure-core" },
     { name = "azure-identity" },
     { name = "azure-mgmt-compute" },
+    { name = "azure-mgmt-resource" },
+    { name = "azure-mgmt-resource-subscriptions" },
 ]
 test-gcp = [
     { name = "google-api-core" },
@@ -3992,7 +3994,9 @@ requires-dist = [
     { name = "azure-mgmt-compute", marker = "extra == 'test-azure'", specifier = ">=37.2.0" },
     { name = "azure-mgmt-network", marker = "extra == 'azure'", specifier = ">=30.2.0" },
     { name = "azure-mgmt-resource", marker = "extra == 'azure'", specifier = ">=25.0.0" },
+    { name = "azure-mgmt-resource", marker = "extra == 'test-azure'", specifier = ">=25.0.0" },
     { name = "azure-mgmt-resource-subscriptions", marker = "extra == 'azure'", specifier = ">=1.0.0" },
+    { name = "azure-mgmt-resource-subscriptions", marker = "extra == 'test-azure'", specifier = ">=1.0.0" },
     { name = "boto3", specifier = ">=1.42.21" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.42.21" },
     { name = "boto3", marker = "extra == 'k8s-legacy'", specifier = ">=1.42.21" },
